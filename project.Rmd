@@ -1,0 +1,302 @@
+---
+title: 'IE 5561: Final Project'
+author: "Quyen Huynh"
+date: "2024-05-03"
+output: pdf_document
+---
+
+# Objective
+
+Heart disease is the leading cause of death in the United States, affecting people of most ethnic backgrounds and genders. Even though heart disease is not curable (yet), predicting and detecting it earlier will help the doctor and patient reduce the severity of the problem and manage the symptoms. The goal of this project is to use machine learning models to predict whether a person has heart disease based on a number of variables.
+
+# Dataset
+
+The dataset used in this project is from Kaggle and can be accessed through the following link: <https://www.kaggle.com/datasets/mexwell/heart-disease-dataset>. There are 1190 observations and 12 variables, with the last variable `target` indicating whether the person has heart disease or not. The dataset attribute description in the link lists the values of the categorical variables, along with other important information about the columns.
+
+# Approaches
+
+First, we need to set working directory and set seed for the entire notebook. We also suppress any warnings and messages in the code output.
+
+```{r, knitr_options}
+set.seed(1)
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+```
+
+Next, we will do some data exploration.
+
+```{r}
+Heart = read.csv("./heart-disease-dataset/heart-disease.csv")
+str(Heart)
+summary(Heart)
+```
+
+There are categorical variables in the dataset, so we will convert those to factors and visualize them.
+
+```{r}
+library(tidyverse)
+library(gridExtra)
+
+# Convert categorical columns to factors
+categorical_vars = c("sex", "chest.pain.type", "fasting.blood.sugar", "resting.ecg", 
+                     "exercise.angina", "ST.slope", "target")
+Heart[categorical_vars] = lapply(Heart[categorical_vars], as.factor)
+
+# List of plots
+plots = vector("list", length(categorical_vars))
+
+i = 1
+for (c in categorical_vars[!categorical_vars=="target"]) {
+  plots[[i]] =
+    ggplot(Heart) +
+      geom_bar(aes(x=.data[[c]], fill=target), position=position_dodge()) +
+      theme_minimal() +
+      scale_fill_brewer(palette="Dark2")
+  i = i + 1
+}
+
+# Arrange plots into 3x2 grid
+do.call("grid.arrange", c(plots, ncol=2))
+```
+
+The top left plot shows that there are more males (1) than females (0) in the dataset and more males having heart disease than their female counterparts. The middle left graph reveals that those having fasting blood sugar higher than 120 mg/dl (1) are more likely to have heart disease than those do not (0), and the latter group makes up a larger portion of the data. Similarly, people who have exercise-induced angina (1) are more likely to have heart disease. An interesting finding is that, in the top right plot, there are much more heart disease cases in the chest pain type 4 group (asymptomatic) than other groups. As to electrocardiogram results, the majority of the observations are normal (0), and there seems to be relatively more heart disease cases in the other groups. Finally, instances with flat slope of the peak exercise ST segment (2), compared to upsloping and downsloping, are more likely to have heart disease.
+
+The bottom right plot shows that there are some observations with `ST.slope` = 0, which is not defined in the attribute description. Checking the value counts of the column, we see that there is only one row with value 0, so we will drop this row.
+
+```{r}
+table(Heart$ST.slope)
+# Drop row with ST.slope = 0
+Heart = Heart[Heart$ST.slope != 0,]
+```
+
+## Logistic Regression
+
+The first method we will try is logistic regression, which is a classic approach to classification problems. The dataset is split into training and test sets before fitting the model. The model tries to predict `target` using all other variables.
+
+```{r}
+# Split 80/20 train/test sets
+train = sample(nrow(Heart), size=0.8*nrow(Heart))
+test = -train
+
+# Logistic Regression
+glm.fit = glm(target ~ ., data=Heart, family="binomial", subset=train)
+summary(glm.fit)
+
+library(caret)
+
+# Function to print metrics using confusion matrix
+printMetrics = function(confuse) {
+  accuracy = round(mean(glm.pred==Heart$target[-train]), 4)
+  sensitivity = round(sensitivity(confuse), 4)
+  specificity = round(specificity(confuse), 4)
+  print(paste("Accuracy:", accuracy))
+  print(paste("Sensitivity:", sensitivity))
+  print(paste("Specificity:", specificity))
+  return (c(accuracy, sensitivity, specificity))
+}
+
+glm.probs = predict(glm.fit, type="response", newdata=Heart[-train,])
+glm.pred = ifelse(glm.probs > 0.5, 1, 0)
+confusion = table(glm.pred, Heart$target[-train])
+confusion
+glm.metrics = printMetrics(confusion)
+```
+
+Since the p-values for `max.heart.rate`, `resting.ecg`, and `resting.bp.s` are relatively high, we will refit the model excluding those variables.
+
+```{r}
+# Drop variables and refit model
+glm.fit = glm(target ~ . -resting.ecg -resting.bp.s -max.heart.rate, 
+              data=Heart, family="binomial", subset=train)
+summary(glm.fit)
+
+glm.probs = predict(glm.fit, type="response", newdata=Heart[-train,])
+glm.pred = ifelse(glm.probs > 0.5, 1, 0)
+confusion = table(glm.pred, Heart$target[-train])
+confusion
+glm.metrics = printMetrics(confusion)
+```
+
+The metrics do not change after removing the variables from the model, so it is likely that the removed variables do not affect the chance of having heart disease.
+
+## Decision Trees
+
+The next approach is decision trees, which are also popular for classification problems. We will first build a decision tree using all predictors, then prune the tree using cross-validation, and use the pruned tree to predict the test data.
+
+```{r, out.width="80%", fig.align="center"}
+library(tree)
+
+# Build initial tree
+Heart.tree = tree(target ~ ., data=Heart, subset=train)
+summary(Heart.tree)
+
+plot(Heart.tree)
+text(Heart.tree, pretty=0)
+
+# Choose optimal number of terminal nodes 
+cv.tree = cv.tree(Heart.tree, FUN=prune.misclass)
+plot(cv.tree$size, cv.tree$dev, type="b", pch=19,
+     xlab="Number of terminal nodes",
+     ylab="CV error")
+
+# Prune tree
+prune.tree = prune.misclass(Heart.tree, k=6)
+plot(prune.tree)
+text(prune.tree, pretty=0)
+
+# Tree predictions
+tree.pred = predict(prune.tree, newdata=Heart[-train,], type="class")
+confusion = table(tree.pred, Heart$target[-train])
+confusion
+tree.metrics = printMetrics(confusion)
+```
+
+Below is another way to build the same tree using different libraries, with a more nicely-formatted output tree.
+
+```{r, out.width="80%", fig.align="center"}
+library(rpart)
+library(rpart.plot)
+
+tree = rpart(target ~ ., data=Heart)
+best = tree$cptable[which.min(tree$cptable[, "xerror"]), "CP"]
+pruned_tree = prune(tree, cp=best)
+prp(pruned_tree)
+
+tree.pred = predict(pruned_tree, newdata=Heart[-train,], type="class")
+confusion = table(tree.pred, Heart$target[-train])
+confusion
+tree.metrics = printMetrics(confusion)
+```
+
+The most important variable in predicting heart disease seems to be whether the person has `ST.slope` = 1, which corresponds to an upsloping peak exercise ST segment. The second most important feature is `chest.pa` = 1,2,3. Looking at the bar plots earlier, we can see that people with `ST.slope` = 1 are less likely to have heart disease, and people in the chest pain type 4 group are more likely to be classified as heart disease patient. Therefore, the decision tree makes sense in classifying people who have `ST.slope` = 1 and `chest.pa` = 1,2,3 (far left branch) as normal, and those not having `ST.slope` = 1 and `chest.pa` = 1,2,3 (far right branch) as heart disease patients. If the observation has a mixed answer yes/no to those criteria, `oldpeak` and `sex` will be considered.
+
+### Bagging
+
+Decision trees usually suffer from high variance, so we will use bagging and random forest to build more powerful trees with lower variance. Random forests are improved bagged trees and consider only a subset of variables at each split of a tree.
+
+```{r}
+library(randomForest)
+
+# Bagging
+Heart.bag = randomForest(target ~ ., data=Heart, subset=train, mtry=11, importance=TRUE)
+Heart.bag
+
+bag.pred = predict(Heart.bag, newdata=Heart[-train,])
+confusion = table(bag.pred, Heart$target[-train])
+confusion
+bag.metrics = printMetrics(confusion)
+```
+
+### Random Forest
+
+We will use $\sqrt{11}=3$ variables to grow a random forest as this is a classification problem.
+
+```{r}
+# Random forest
+Heart.rf = randomForest(target ~ ., data=Heart, subset=train, mtry=3, importance=TRUE)
+Heart.rf
+
+rf.pred = predict(Heart.rf, newdata=Heart[-train,])
+confusion = table(rf.pred, Heart$target[-train])
+confusion
+rf.metrics = printMetrics(confusion)
+
+# Variable importance
+importance(Heart.rf)
+varImpPlot(Heart.rf)
+```
+
+The results indicate that across all of the trees considered in the random forest, the slope of the peak exercise ST segment (`ST.slope`) and the chest pain type (`chest.pain.type`) are by far the two most important variables.
+
+### Boosting
+
+Rather than fitting a single decision tree to the data, the boosting approach learns slowly and fits a tree to the residuals from the current model rather than the outcome Y.
+
+```{r, out.width="80%", fig.align="center"}
+library(gbm)
+
+# Convert `target` to numeric
+temp = Heart$target
+Heart$target = as.numeric(Heart$target) - 1
+
+# Boosting
+Heart.gbm = gbm(target ~ ., data=Heart[train,], distribution="bernoulli", n.trees=5000,
+                interaction.depth=5)
+summary(Heart.gbm)
+
+# Convert `target` back to factor
+Heart$target = as.factor(Heart$target)
+
+gbm.prob = predict(Heart.gbm, newdata=Heart[-train,], type="response", n.trees=5000)
+gbm.pred = ifelse(gbm.prob > 0.5, 1, 0)
+confusion = table(gbm.pred, Heart$target[-train])
+confusion
+boost.metrics = printMetrics(confusion)
+```
+
+## Support Vector Machine (SVM)
+
+The last approach we will try is support vector machines, with two different kernels: radial and polynomial. We will perform cross-validation to find the best $\gamma$ for the model with radial kernel and best degree d for the model with polynomial kernel.
+
+```{r}
+library(e1071)
+
+# SVM with radial kernel
+svm.tune = tune(svm, target ~ ., data=Heart[train,], kernel="radial", 
+                ranges=list(cost=c(0.1,1,10,100,1000),
+                            gamma=c(0.1,0.5,1,2,3,4)))
+summary(svm.tune)
+
+svm.pred = predict(svm.tune$best.model, newdata=Heart[-train,])
+confusion = table(svm.pred, Heart$target[-train])
+svm.radial.metrics = printMetrics(confusion)
+
+# SVM with polynomial kernel
+svm.tune = tune(svm, target ~ ., data=Heart[train,], kernel="polynomial", 
+                ranges=list(cost=c(0.1,1,10,100,1000),
+                            d=c(1,2,3,4,5)))
+summary(svm.tune)
+
+svm.pred = predict(svm.tune$best.model, newdata=Heart[-train,])
+confusion = table(svm.pred, Heart$target[-train])
+svm.poly.metrics = printMetrics(confusion)
+```
+
+# Discussion
+
+## Model Performance
+
+```{r}
+library(knitr)
+
+# Summary of metrics for all models
+all.metrics = data.frame(
+  cbind(glm.metrics, tree.metrics, bag.metrics, rf.metrics, boost.metrics,
+        svm.radial.metrics, svm.poly.metrics),
+  row.names = c("Accuracy", "Sensitivity", "Specificity"))
+
+colnames(all.metrics) = c("Logistic Regression", "Decision Tree", "Bagging", "Random Forest",
+                          "Boosting", "SVM Radial", "SVM Polynomial")
+kable(all.metrics)
+```
+
+Accuracy rate stays the same across all models. The SVM model with polynomial kernel has the highest sensitivity, and random forest has the highest specificity. A high sensitivity means that there are few false negative results, and a high specificity means that there are few false positive results. Even though the SVM with polynomial kernel has the highest sensitivity, its specificity is the lowest among all models. Using a model with low specificity in the healthcare setting would lead to many false positive cases and patients receiving unnecessary medical treatments. Meanwhile, Bagging and Random Forest have the second highest sensitivity, and their specificity values are also in the top 2.
+
+It is clear that, for our problem, Random Forest is the best model, closely followed by Bagging. Boosting and SVM with radial kernel have only slightly lower sensitivity and specificity than the top 2 models. As mentioned above, SVM with polynomial kernel has the highest sensitivity but lowest specificity. Since heart disease is a serious health condition and the leading cause of death in the US, a model with high sensitivity is desirable. It is more important to correctly diagnose all the positive cases than trying to lower the false positive rate. However, while Random Forest has a sensitivity rate that is around 2% lower than that of SVM with polynomial kernel, the former has a specificity rate that is a little more than 10% higher than that of the latter. Therefore, it is better to prefer the Random Forest model in this case. Finally, the Logistic Regression and Simple Decision Tree have the worst performance, likely due to their simple model assumptions of the data.
+
+Aside from the models presented above, LDA and QDA were also considered, but they cannot be applied to this data because the variables are not continuous and do not meet the normal distribution requirement.
+
+## Variable Importance
+
+It is consistent across all models that `ST.slope` and `chest.pain.type` are the two most important variables in deciding whether a person has heart disease. The variable importance plot from the Random Forest model and the relative influence plot from Boosting show those two variables at the top; the decision trees also have those two factors at the first two splits. This makes sense because chest pain is indeed the most common symptom of heart disease. Other important variables are `oldpeak`, `sex`, `cholesterol`, and `max.heart.rate`. 
+
+The Logistic Regression model does not have a small p-value for `max.heart.rate`, and this is likely due to the simple model formula, as maximum heart rate can be an important factor in the health of the heart. Decision Trees outperform other models in interpretability and visuals as they are easy to use, even by people who are less familiar with machine learning models. Logistic Regression is also not too difficult to interpret, given that the formula is provided. However, as we can see from the model performance summary, despite their high interpretability, Logistic Regression and Decision Trees have the lowest performance in terms of sensitivity and specificity. This is an important trade-off that we should keep in mind.
+
+
+# Conclusion
+
+As heart disease is a serious health condition and affects many people, not just in the US but also around the world, it has always been of great interest to develop machine learning models to predict heart disease. This project explored a number of classification models, such as Logistic Regression, Decision Trees, Random Forests, SVM, etc., all of which can be used to predict whether a person has heart disease using a number of variables. The results show that Random Forest performs the best on this dataset, followed by the Bagging approach. The models reveal the most important factors in predicting heart disease to be the slope of the peak exercise ST segment and the type of chest pain, followed by other variables such as sex, cholesterol, max heart rate, etc.
+
+To improve model performance and further the development of heart disease predicting models, there are a few suggestions. First, we can explore other formulas, such as polynomial and interactions, in the Logistic Regression model. Subset selection can be used to narrow down the most important features, and regularization can be added to improve model fitting. Second, the parameters in the more complex models, such as number of trees and interaction depth in Boosting, can be further tuned by cross-validation. Finally, it is possible that other classification models that were not discussed in this project perform even better, such as KNN, neural networks, etc. No matter which model we choose, it is crucial to consider the sensitivity of the approach, as detecting heart disease early is better than incorrect classification and further complications for the patient.
+
+
+
